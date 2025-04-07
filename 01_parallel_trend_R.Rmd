@@ -1,0 +1,166 @@
+---
+title: "01_parallel_trend_R"
+output: html_notebook
+---
+
+ref: https://github.com/vikjam/mostly-harmless-replication/blob/master/05%20Fixed%20Effects%2C%20DD%20and%20Panel%20Data/05%20Fixed%20Effects%2C%20DD%20and%20Panel%20Data.md 
+
+```{r}
+library(dplyr)
+library(lfe)
+library(ggplot2)
+library(lubridate)
+library(tidyverse)
+```
+
+```{r}
+# df <- read.csv("./input_data/visiting_pattern.csv")
+
+df <- read.csv("./input_data/df_withincome_race.csv")
+
+head(df)
+```
+
+
+```{r}
+## For visit df
+# clean_df <- select(df,PLACEKEY,'NAICS_CODE_x',"LATITUDE_x","LONGITUDE_x","DATE_RANGE_START","in1km_x","VISIT_BY_DAY_list","date_xh","dow_x","tract","population","income","poverty_ratio","lessedu_ratio","female_ratio","white_ratio","black_ratio","asian_ratio","walk_work","transit_work","drive_work","SPEND_BY_DAY_x","SPEND_PER_TRANSACTION_BY_DAY_x")
+
+# For income df
+clean_df <- select(df,PLACEKEY,'NAICS_CODE_x',"LATITUDE_x","LONGITUDE_x","DATE_RANGE_START","in1km_x","VISIT_BY_DAY_list","date_xh","dow_x","tract","population","income","poverty_ratio","lessedu_ratio","female_ratio","white_ratio","black_ratio","asian_ratio","walk_work","transit_work","drive_work","SPEND_BY_DAY_x","SPEND_PER_TRANSACTION_BY_DAY_x",'income_seg','race_seg')
+
+lower_bound <- quantile(df$VISIT_BY_DAY_list, probs = 0.03)
+upper_bound <- quantile(df$VISIT_BY_DAY_list, probs = 0.97)
+
+# filter the outliers
+clean_df <- clean_df[clean_df$VISIT_BY_DAY_list >= lower_bound & clean_df$VISIT_BY_DAY_list <= upper_bound, ]
+
+clean_df$in1km_x <- clean_df$in1km_x == "True"
+clean_df <- mutate(clean_df, in1km_x = as.integer(clean_df$in1km_x))
+clean_df$date_xh <- as.Date(clean_df$date_xh)
+head(clean_df)
+```
+
+```{r}
+baseline_date <- as.Date("2022-12-12")
+
+clean_df <- clean_df %>%
+  mutate(week_num = as.integer(floor((date_xh - baseline_date) / 7)))
+
+clean_df <- clean_df %>%
+  mutate(week_num = case_when(
+    week_num < -8 ~ -8,
+    week_num > 8 ~ 8,
+    TRUE ~ week_num
+  ))
+
+# create dummy variables
+week_numbers <- unique(clean_df$week_num)
+
+for (week in week_numbers) {
+  col_name <- paste0("week", week)
+  clean_df[[col_name]] <- ifelse(clean_df$week_num == week, 1, 0)
+} 
+
+# interaction term
+for (week in week_numbers) {
+  col_name <- paste0("week", week)
+  prod_col_name <- paste0("prod_week", week)
+  clean_df[[prod_col_name]] <- clean_df[[col_name]] * clean_df$in1km_x
+}
+
+clean_df <- clean_df %>%
+  select(-starts_with("week"))
+
+head(clean_df)
+```
+
+```{r}
+# ## For visit df
+# did_model <- felm(
+#   VISIT_BY_DAY_list ~  prod_week8 + prod_week7 + prod_week6 + prod_week5 +
+#     prod_week4 + prod_week3 + prod_week2 + prod_week1 + prod_week0 +
+#     `prod_week-2` + `prod_week-3` + `prod_week-4` + `prod_week-5` +
+#     `prod_week-6` + `prod_week-7` + `prod_week-8`
+#   | PLACEKEY + DATE_RANGE_START  # fixed effect: individual and week (time)
+#   | 0  
+#   | PLACEKEY, 
+#   data = clean_df
+# )
+
+# For income df
+did_model <- felm(
+  race_seg ~  prod_week8 + prod_week7 + prod_week6 + prod_week5 +
+    prod_week4 + prod_week3 + prod_week2 + prod_week1 + prod_week0 +
+    `prod_week-2` + `prod_week-3` + `prod_week-4` + `prod_week-5` +
+    `prod_week-6` + `prod_week-7` + `prod_week-8`
+  | PLACEKEY + DATE_RANGE_START  # fixed effect: individual and week (time)
+  | 0  
+  | PLACEKEY,  
+  data = clean_df
+)
+
+summary(did_model)
+
+```
+
+```{r}
+# define lags_leads and labels
+lags_leads <- c(
+  '`prod_week-8`','`prod_week-7`', '`prod_week-6`', '`prod_week-5`', '`prod_week-4`', 
+  '`prod_week-3`', '`prod_week-2`', 'prod_week0', 'prod_week1', 
+  'prod_week2', 'prod_week3', 'prod_week4', 'prod_week5', 
+  'prod_week6', 'prod_week7', 'prod_week8'
+)
+
+labels <- c(
+  "8 yr and years prior", "7 yr prior", "6 yr prior", "5 yr prior", "4 yr prior", 
+  "3 yr prior", "2 yr prior", "Yr of adopt", "1 yr after", 
+  "2 yr after", "3 yr after", "4 yr after", "5 yr after", 
+  "6 yr after", "7 yr after", "8 yr and years after"
+)
+
+# extract the coefficents and se
+results.did_model <- data.frame(
+  label = factor(labels, levels = labels), 
+  coef = summary(did_model)$coef[lags_leads, "Estimate"],  
+  se = summary(did_model)$coef[lags_leads, "Cluster s.e."] 
+)
+
+# print(results.did_model)
+
+results.did_model <- results.did_model %>%
+  add_row(
+    label = "1 yr prior", 
+    coef = 0, 
+    se = 0,  
+    .after = which(results.did_model$label == "2 yr prior")  
+  )
+
+results.did_model$label <- factor(
+  results.did_model$label,
+  levels = c(
+    "8 yr and years prior", "7 yr prior", "6 yr prior", "5 yr prior", "4 yr prior", 
+    "3 yr prior", "2 yr prior", "1 yr prior", "Yr of adopt", 
+    "1 yr after", "2 yr after", "3 yr after", "4 yr after", 
+    "5 yr after", "6 yr after", "7 yr after", "8 yr and years after"
+  )
+)
+
+# print(results.did_model)
+
+g <- ggplot(results.did_model, aes(label, coef, group = 1))
+p <- g + geom_point() +
+  geom_line(linetype = "dotted") +
+  geom_pointrange(aes(
+    ymax = coef + 1.96 * se,  
+    ymin = coef - 1.96 * se   
+  )) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +  
+  ylab("Effect") +  
+  xlab("Time relative to year of adoption") +  
+  theme_minimal() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+
+print(p)
+```
